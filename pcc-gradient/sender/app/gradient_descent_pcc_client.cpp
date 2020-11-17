@@ -22,12 +22,13 @@ void* monitor(void*);
 DWORD WINAPI monitor(LPVOID);
 #endif
 
-double rate_sum = 0;
-double rtt_sum = 0;
-double avg_loss_rate = 0;
-double base_loss = 0;
-double base_sent = 0;
-unsigned int iteration_count = 0;
+// for logging
+char* file_name;
+std::ofstream logger;
+void segfault_sigaction(int signal, siginfo_t *si, void *arg);
+void writeToLog(std::ofstream &logFile, int64_t relativeTime, double rate, double rtt,
+                     int window, int64_t sent, int loss, int ack, int nack);
+
 
 PCC* cchandle = NULL;
 
@@ -41,48 +42,45 @@ double PCC::kLatencyCoefficient(0);
 double PCC::kInitialBoundary(0);
 double PCC::kBoundaryIncrement(0);
 
-void intHandler(int dummy) {
-	if (iteration_count  > 0) {
-		cout << "Avg. rate: " <<  rate_sum / iteration_count << " loss rate = " << avg_loss_rate << " avg. RTT = " << rtt_sum / iteration_count;
-		if (cchandle != NULL) {
-			cout<< " average utility = " << cchandle->avg_utility();
-		}
-		cout << endl;
-	}
-	exit(0);
-}
-
 
 int main(int argc, char* argv[])
 {
-   if ((argc < 3) || (0 == atoi(argv[2])))
+   
+   if ((argc < 4) || (0 == atoi(argv[2])))
    {
-      cout << "usage: " << argv[0] << " server_ip server_port [factor] [step] [alpha = 4] [beta = 1] [exponent = 2.5] [poly_utility = 1]" << endl;
+      cout << "usage: " << argv[0] << " server_ip server_port log_file [factor] [step] [alpha = 4] [beta = 1] [exponent = 2.5] [poly_utility = 1]" << endl;
       return 0;
    }
-	signal(SIGINT, intHandler);
+
+   // catching segmentation faults
+   struct sigaction sa;
+   memset(&sa, 0, sizeof(struct sigaction));
+   sigemptyset(&sa.sa_mask);
+   sa.sa_sigaction = segfault_sigaction;
+   sa.sa_flags   = SA_SIGINFO;
+   sigaction(SIGSEGV, &sa, NULL);
 
 	double alpha = 1;
 	double beta = 10.8;
 	double exponent = 0.9;
 	bool use_poly = true;
-        double factor = 1.0;
-        double step = 0.05;
-        double latency = 0;
-        double initial_boundary = 0.05;
-        double boundary_increment = 0.06;
+   double factor = 1.0;
+   double step = 0.05;
+   double latency = 0;
+   double initial_boundary = 0.05;
+   double boundary_increment = 0.06;
 
 
-	if (argc > 3) latency = atof(argv[3]);
-	if (argc > 4) factor = atof(argv[4]);
-	if (argc > 5) step = atof(argv[5]);
-	if (argc > 6) initial_boundary = atof(argv[6]);
-	if (argc > 7) boundary_increment = atof(argv[7]);
-	if (argc > 8) alpha = atof(argv[8]);
-	if (argc > 9) beta = atof(argv[9]);
-	if (argc > 10) exponent = atof(argv[8]);
+	if (argc > 4) latency = atof(argv[3]);
+	if (argc > 5) factor = atof(argv[4]);
+	if (argc > 6) step = atof(argv[5]);
+	if (argc > 7) initial_boundary = atof(argv[6]);
+	if (argc > 8) boundary_increment = atof(argv[7]);
+	if (argc > 9) alpha = atof(argv[8]);
+	if (argc > 10) beta = atof(argv[9]);
+	if (argc > 11) exponent = atof(argv[8]);
 	PCC::set_utility_params(alpha, beta, exponent, use_poly, factor, step, latency, initial_boundary, boundary_increment);
-//sleep(1500);
+   //sleep(1500);
    // use this function to initialize the UDT library
    UDT::startup();
 
@@ -131,6 +129,7 @@ int main(int argc, char* argv[])
       cout << "incorrect server/peer address. " << argv[1] << ":" << argv[2] << endl;
       return 0;
    }
+   file_name = argv[3];
 
    // connect to the server, implict bind
    if (UDT::ERROR == UDT::connect(client, peer->ai_addr, peer->ai_addrlen))
@@ -173,7 +172,7 @@ int main(int argc, char* argv[])
       if (ssize < size)
          break;
    }
-
+   logger.close();
    UDT::close(client);
 
    delete [] data;
@@ -190,47 +189,34 @@ void* monitor(void* s)
 DWORD WINAPI monitor(LPVOID s)
 #endif
 {
-   UDTSOCKET u = *(UDTSOCKET*)s;
+   logger.open(file_name);
+   logger << "time," << "rate," << "rtt," << "pktsflight," << "total," << "tloss," << "acks," << "nacks\n";
 
+   UDTSOCKET u = *(UDTSOCKET*)s;
    UDT::TRACEINFO perf;
 
-   cout << "SendRate(Mb/s)\tRTT(ms)\tCTotal\tLoss\tRecvACK\tRecvNAK" << endl;
    int i=0;
    while (true)
    {
       #ifndef WIN32
-         usleep(1000000);
+         usleep(10000);
       #else
          Sleep(1000);
       #endif
-    i++;
-    if(i>10000)
-        {
-        exit(1);
-        }
+      i++;
+      if(i > 10000)
+      {
+        exit(1); 
+      }
       if (UDT::ERROR == UDT::perfmon(u, &perf))
       {
          cout << "perfmon: " << UDT::getlasterror().getErrorMessage() << endl;
          break;
       }
-    cout<<""<<i<<"\t" << perf.mbpsSendRate << "\t"
-           << perf.msRTT << "\t"
-           <<  perf.pktSentTotal << "\t"
-           << perf.pktSndLossTotal <<endl;
-	if (perf.pktSentTotal == 0) {
-		avg_loss_rate = 0;
-	} else {
-		avg_loss_rate = (1.0 * perf.pktSndLossTotal - base_loss) / (1.0 * perf.pktSentTotal - base_sent);
-	}
+      writeToLog(logger, perf.msTimeStamp, perf.mbpsSendRate, perf.msRTT,
+                           perf.pktFlightSize, perf.pktSentTotal, perf.pktSndLossTotal,
+                           perf.pktRecvACKTotal, perf.pktRecvNAKTotal);
 
-	if (i == 10) {
-		base_loss = 1.0 * perf.pktSndLossTotal;
-		base_sent = 1.0 * perf.pktSentTotal;
-	} else if (i > 10) {
-		rate_sum += perf.mbpsSendRate;
-		rtt_sum += perf.msRTT;
-		iteration_count++;
-	}
    }
 
    #ifndef WIN32
@@ -240,3 +226,23 @@ DWORD WINAPI monitor(LPVOID s)
    #endif
 }
 
+void writeToLog(std::ofstream &logFile, int64_t relativeTime, double rate, double rtt,
+                     int window, int64_t sent, int loss, int ack, int nack)
+{
+   logFile << relativeTime << "," << rate;
+   logFile << "," << rtt;
+   logFile << "," << window;
+   logFile << "," << sent;
+   logFile << "," << loss;
+   logFile << "," << ack;
+   logFile << "," << nack;
+   logFile << "\n";
+
+   return;
+}
+
+void segfault_sigaction(int signal, siginfo_t *si, void *arg)
+{
+   logger.close();
+   exit(0);
+}

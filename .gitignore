@@ -1,0 +1,16 @@
+*.o
+*.a
+*.so
+appclient
+appserver
+gradient_descent_pcc_client
+incast_client
+incastserver
+test
+udt
+recvfile
+sendfile
+temp_log.txt
+recv_log.txt
+sender_log.txt
+.vscode

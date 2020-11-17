@@ -15,24 +15,17 @@
 
 using namespace std;
 
-double rate_sum = 0;
-double avg_loss_rate = 0;
-double rtt_sum = 0;
-unsigned int iteration_count = 0;
+
+// for logging
+char* file_name;
+std::ofstream logger;
+void segfault_sigaction(int signal, siginfo_t *si, void *arg);
+void writeToLog(std::ofstream &logFile, int64_t relativeTime, double rate, double rtt,
+                     int window, int64_t sent, int loss, int ack, int nack);
 
 
 BBCC* cchandle = NULL;
 
-void intHandler(int dummy) {
-	if (iteration_count  > 0) {
-		cout << "Avg. rate: " <<  rate_sum / iteration_count << " loss rate = " << avg_loss_rate << " avg. RTT = " << rtt_sum / iteration_count;
-		//if (cchandle != NULL) {
-			//cout<< " average utility = " << cchandle->avg_utility();
-		//}
-		cout << endl;
-	}
-	exit(0);
-}
 
 #ifndef WIN32
 void* monitor(void*);
@@ -42,13 +35,21 @@ DWORD WINAPI monitor(LPVOID);
 
 int main(int argc, char* argv[])
 {
-   if ((3 != argc) || (0 == atoi(argv[2])))
+
+   // catching segmentation faults
+   struct sigaction sa;
+   memset(&sa, 0, sizeof(struct sigaction));
+   sigemptyset(&sa.sa_mask);
+   sa.sa_sigaction = segfault_sigaction;
+   sa.sa_flags   = SA_SIGINFO;
+   sigaction(SIGSEGV, &sa, NULL);
+
+   if ((4 != argc) || (0 == atoi(argv[2])))
    {
-      cout << "usage: appclient server_ip server_port" << endl;
+      cout << "usage: appclient server_ip server_port log_file" << endl;
       return 0;
    }
-	signal(SIGINT, intHandler);
-//sleep(1500);
+   //sleep(1500);
    // use this function to initialize the UDT library
    UDT::startup();
 
@@ -99,6 +100,7 @@ int main(int argc, char* argv[])
       cout << "incorrect server/peer address. " << argv[1] << ":" << argv[2] << endl;
       return 0;
    }
+   file_name = argv[3];
 
    // connect to the server, implict bind
    if (UDT::ERROR == UDT::connect(client, peer->ai_addr, peer->ai_addrlen))
@@ -143,7 +145,7 @@ int main(int argc, char* argv[])
       if (ssize < size)
          break;
    }
-
+   logger.close();
    UDT::close(client);
 
    delete [] data;
@@ -160,46 +162,33 @@ void* monitor(void* s)
 DWORD WINAPI monitor(LPVOID s)
 #endif
 {
-   UDTSOCKET u = *(UDTSOCKET*)s;
+   logger.open(file_name);
+   logger << "time," << "rate," << "rtt," << "pktsflight," << "total," << "tloss," << "acks," << "nacks\n";
 
+   UDTSOCKET u = *(UDTSOCKET*)s;
    UDT::TRACEINFO perf;
 
-   cout << "SendRate(Mb/s)\tRTT(ms)\tCTotal\tLoss\tRecvACK\tRecvNAK" << endl;
    int i=0;
    while (true)
    {
       #ifndef WIN32
-         usleep(1000000);
+         usleep(10000);
       #else
          Sleep(1000);
       #endif
-    i++;
-    if(i>10000)
-        {
-        exit(1); 
-        }
+      i++;
+      if(i>10000)
+      {
+         exit(1); 
+      }
       if (UDT::ERROR == UDT::perfmon(u, &perf))
       {
          cout << "perfmon: " << UDT::getlasterror().getErrorMessage() << endl;
          break;
       }
-    cout <<i<<"\t"<< perf.mbpsSendRate << "\t"
-           << perf.msRTT << "\t"
-           <<  perf.pktSentTotal << "\t"
-           << perf.pktSndLossTotal << "\t\t\t"
-           << perf.pktRecvACKTotal << "\t"
-           << perf.pktRecvNAKTotal << endl;
-	if (perf.pktSentTotal == 0) {
-		avg_loss_rate = 0;
-	} else {
-		avg_loss_rate = (1.0 * perf.pktSndLossTotal) / (1.0 * perf.pktSentTotal);
-	}
-	if (i > 10) {
-		rate_sum += perf.mbpsSendRate;
-		rtt_sum += perf.msRTT;
-		iteration_count++;		
-	}
-
+      writeToLog(logger, perf.msTimeStamp, perf.mbpsSendRate, perf.msRTT,
+                           perf.pktFlightSize, perf.pktSentTotal, perf.pktSndLossTotal,
+                           perf.pktRecvACKTotal, perf.pktRecvNAKTotal);
 
    }
 
@@ -208,4 +197,25 @@ DWORD WINAPI monitor(LPVOID s)
    #else
       return 0;
    #endif
+}
+
+void writeToLog(std::ofstream &logFile, int64_t relativeTime, double rate, double rtt,
+                     int window, int64_t sent, int loss, int ack, int nack)
+{
+   logFile << relativeTime << "," << rate;
+   logFile << "," << rtt;
+   logFile << "," << window;
+   logFile << "," << sent;
+   logFile << "," << loss;
+   logFile << "," << ack;
+   logFile << "," << nack;
+   logFile << "\n";
+
+   return;
+}
+
+void segfault_sigaction(int signal, siginfo_t *si, void *arg)
+{
+   logger.close();
+   exit(0);
 }
